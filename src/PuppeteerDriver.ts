@@ -130,9 +130,9 @@ class PuppeteerTestee {
   inflightRequests: { [key: string]: boolean };
   inflightRequestsSettledCallback: (() => void) | null;
 
-  constructor(config) {
-    debugTestee('PuppeteerTestee.constructor', config);
-    this.configuration = config.client.configuration;
+  constructor(deps) {
+    debugTestee('PuppeteerTestee.constructor', deps);
+    this.configuration = deps.client.configuration;
     this.client = new Client(this.configuration);
     this.inflightRequests = {};
     this.inflightRequestsSettledCallback = null;
@@ -760,14 +760,17 @@ class PuppeteerTestee {
   }
 }
 
-class PuppeteerDriver extends DeviceDriverBase {
-  constructor(config) {
-    super(config);
-    debug('constructor', config);
-
-    this.testee = new PuppeteerTestee(config);
+class PuppeteerEnvironmentValidator {
+  validate() {
+    // const detoxFrameworkPath = await environment.getFrameworkPath();
+    // if (!fs.existsSync(detoxFrameworkPath)) {
+    //   throw new Error(`${detoxFrameworkPath} could not be found, this means either you changed a version of Xcode or Detox postinstall script was unsuccessful.
+    //   To attempt a fix try running 'detox clean-framework-cache && detox build-framework-cache'`);
+    // }
   }
+}
 
+class PuppeteerArtifactPluginsProvider {
   declareArtifactPlugins() {
     debug('declareArtifactPlugins');
     return {
@@ -776,6 +779,67 @@ class PuppeteerDriver extends DeviceDriverBase {
       screenshot: (api) => new PuppeteerScreenshotPlugin({ api, driver: this }),
       video: (api) => new PuppeteerRecordVideoPlugin({ api, driver: this }),
     };
+  }
+}
+
+class PuppeteerAllocCookie {
+  testee: PuppeteerTestee;
+  id: any;
+
+  constructor(testee) {
+    this.testee = testee;
+    this.id = '';
+  }
+}
+
+class PuppeteerDeviceAllocation {
+  private readonly testee: PuppeteerTestee;
+
+  constructor(deps) {
+    this.testee = new PuppeteerTestee(deps);
+  }
+
+  async allocate(deviceConfig) {
+    debug('PuppeteerAllocation.allocate', deviceConfig.device);
+    return new PuppeteerAllocCookie(this.testee);
+  }
+}
+
+class PuppeteerDeviceDeallocation {
+  private readonly emitter: any;
+  private readonly id: any;
+
+  constructor(cookie: PuppeteerAllocCookie, deps) {
+    this.id = cookie.id;
+    this.emitter = deps.eventEmitter;
+  }
+
+  async free({ shutdown }) {
+    if (shutdown) {
+      await this.emitter.emit('beforeShutdownDevice', { deviceId: this.id });
+      await this.emitter.emit('shutdownDevice', { deviceId: this.id });
+    }
+  }
+}
+
+class PuppeteerRuntimeDriver extends DeviceDriverBase {
+  private readonly deviceId: any;
+  private readonly testee: PuppeteerTestee;
+
+  constructor(cookie: PuppeteerAllocCookie, deps) {
+    super(deps);
+    debug('constructor');
+
+    this.testee = cookie.testee;
+    this.deviceId = cookie.id;
+  }
+
+  getExternalId() {
+    return '';
+  }
+
+  getDeviceName() {
+    return 'puppeteer';
   }
 
   createPayloadFile(notification) {
@@ -799,11 +863,11 @@ class PuppeteerDriver extends DeviceDriverBase {
     enableSynchronization = false;
   }
 
-  async shake(deviceId) {
+  async shake() {
     return await this.client.shake();
   }
 
-  async setOrientation(deviceId, orientation) {
+  async setOrientation(orientation) {
     const viewport = page!.viewport()!;
     const isLandscape = orientation === 'landscape';
     const largerDimension = Math.max(viewport.width, viewport.height);
@@ -820,15 +884,7 @@ class PuppeteerDriver extends DeviceDriverBase {
     return 'web';
   }
 
-  async prepare() {
-    // const detoxFrameworkPath = await environment.getFrameworkPath();
-    // if (!fs.existsSync(detoxFrameworkPath)) {
-    //   throw new Error(`${detoxFrameworkPath} could not be found, this means either you changed a version of Xcode or Detox postinstall script was unsuccessful.
-    //   To attempt a fix try running 'detox clean-framework-cache && detox build-framework-cache'`);
-    // }
-  }
-
-  async recordVideo(deviceId) {
+  async recordVideo() {
     debug('recordVideo', { page: !!page });
     if (!page) {
       recordVideo = true;
@@ -841,7 +897,7 @@ class PuppeteerDriver extends DeviceDriverBase {
     isRecording = true;
   }
 
-  async stopVideo(deviceId) {
+  async stopVideo() {
     debug('stopVideo', { pendingExport });
     if (pendingExport) {
       const value = pendingExport;
@@ -873,8 +929,8 @@ class PuppeteerDriver extends DeviceDriverBase {
     return pendingExport;
   }
 
-  async cleanup(deviceId, bundleId) {
-    debug('TODO cleanup', { deviceId, bundleId, browser: !!browser });
+  async cleanup(bundleId) {
+    debug('TODO cleanup', { bundleId, browser: !!browser });
     // await sleep(100000);
 
     if (browser) {
@@ -886,12 +942,7 @@ class PuppeteerDriver extends DeviceDriverBase {
     // stopSync is safe to call even if startSync() wasn't
     xvfb.stopSync();
 
-    await super.cleanup(deviceId, bundleId);
-  }
-
-  async acquireFreeDevice(deviceQuery) {
-    debug('PuppeteerDriver.acquireFreeDevice', deviceQuery);
-    return '';
+    await super.cleanup(bundleId);
   }
 
   async getBundleIdFromBinary(appPath) {
@@ -899,13 +950,13 @@ class PuppeteerDriver extends DeviceDriverBase {
     return '';
   }
 
-  async installApp(deviceId, binaryPath) {
-    debug('installApp', { deviceId, binaryPath });
+  async installApp(binaryPath) {
+    debug('installApp', { binaryPath });
   }
 
-  async uninstallApp(deviceId, bundleId) {
-    debug('uninstallApp', { deviceId, bundleId });
-    await this.emitter.emit('beforeUninstallApp', { deviceId, bundleId });
+  async uninstallApp(bundleId) {
+    debug('uninstallApp', { bundleId });
+    await this.emitter.emit('beforeUninstallApp', { deviceId: this.deviceId, bundleId });
     if (browser) {
       await browser.close();
       browser = null;
@@ -913,15 +964,16 @@ class PuppeteerDriver extends DeviceDriverBase {
     }
   }
 
-  async launchApp(deviceId, bundleId, launchArgs, languageAndLocale) {
+  async launchApp(bundleId, launchArgs, languageAndLocale) {
     debug('launchApp', {
       browser: !!browser,
-      deviceId,
       bundleId,
       launchArgs,
       languageAndLocale,
       config: this.deviceConfig,
     });
+    const { deviceId } = this;
+
     await this.emitter.emit('beforeLaunchApp', {
       bundleId,
       deviceId,
@@ -966,11 +1018,11 @@ class PuppeteerDriver extends DeviceDriverBase {
       page = (await browser.pages())[0];
       await page!.goto(url, { waitUntil: NETWORKIDLE });
       if (recordVideo) {
-        await this.recordVideo(deviceId);
+        await this.recordVideo();
       }
     }
 
-    await this._applyPermissions(deviceId, bundleId);
+    await this._applyPermissions();
 
     // const pid = await this.applesimutils.launch(deviceId, bundleId, launchArgs, languageAndLocale);
     const pid = 'PID';
@@ -992,43 +1044,37 @@ class PuppeteerDriver extends DeviceDriverBase {
     return this._getDeviceOption('defaultViewport', { width: 1280, height: 720 });
   }
 
-  async terminate(deviceId, bundleId) {
-    debug('terminate', { deviceId, bundleId });
+  async terminate(bundleId) {
+    debug('terminate', { bundleId });
     // If we're in the middle of recording, signal to the next launch that we should start
     // in a recording state
     if (isRecording) {
       recordVideo = true;
     }
-    await this.stopVideo(deviceId);
-    await this.emitter.emit('beforeTerminateApp', { deviceId, bundleId });
+    await this.stopVideo();
+    await this.emitter.emit('beforeTerminateApp', { deviceId: this.deviceId, bundleId });
     if (browser) {
       await browser.close();
       browser = null;
       page = null;
     }
     // await this.applesimutils.terminate(deviceId, bundleId);
-    await this.emitter.emit('terminateApp', { deviceId, bundleId });
+    await this.emitter.emit('terminateApp', { deviceId: this.deviceId, bundleId });
   }
 
-  async sendToHome(deviceId) {
+  async sendToHome() {
     await page!.goto('https://google.com');
   }
 
-  async shutdown(deviceId) {
-    await this.emitter.emit('beforeShutdownDevice', { deviceId });
-    await this.applesimutils.shutdown(deviceId);
-    await this.emitter.emit('shutdownDevice', { deviceId });
-  }
-
-  async setLocation(deviceId, latitude, longitude) {
+  async setLocation(latitude, longitude) {
     await page!.setGeolocation({
       latitude: Number.parseFloat(latitude),
       longitude: Number.parseFloat(longitude),
     });
   }
 
-  async setPermissions(deviceId, bundleId, permissions: { [key: string]: string }) {
-    debug('setPermissions', { deviceId, bundleId, permissions });
+  async setPermissions(bundleId, permissions: { [key: string]: string }) {
+    debug('setPermissions', { bundleId, permissions });
     const PERMISSIONS_LOOKUP = {
       // calendar: '',
       camera: 'camera',
@@ -1056,7 +1102,7 @@ class PuppeteerDriver extends DeviceDriverBase {
     this.requestedPermissions = requestedPermissions;
   }
 
-  async _applyPermissions(deviceId: string, bundleId: string) {
+  async _applyPermissions() {
     if (browser && this.requestedPermissions) {
       const context = browser.defaultBrowserContext();
       await context.clearPermissionOverrides();
@@ -1067,15 +1113,11 @@ class PuppeteerDriver extends DeviceDriverBase {
     }
   }
 
-  async clearKeychain(deviceId) {
-    await this.applesimutils.clearKeychain(deviceId);
+  async clearKeychain() {
   }
 
-  async resetContentAndSettings(deviceId) {
+  async resetContentAndSettings() {
     debug('TODO resetContentAndSettings');
-    // await this.shutdown(deviceId);
-    // await this.applesimutils.resetContentAndSettings(deviceId);
-    // await this._boot(deviceId);
   }
 
   validateDeviceConfig(deviceConfig) {
@@ -1088,8 +1130,7 @@ class PuppeteerDriver extends DeviceDriverBase {
     }
   }
 
-  getLogsPaths(deviceId) {
-    return this.applesimutils.getLogsPaths(deviceId);
+  getLogsPaths() {
   }
 
   async waitForBackground() {
@@ -1098,7 +1139,7 @@ class PuppeteerDriver extends DeviceDriverBase {
     return Promise.resolve('');
   }
 
-  async takeScreenshot(udid, screenshotName) {
+  async takeScreenshot(screenshotName) {
     const tempPath = await temporaryPath.for.png();
     await page!.screenshot({ path: tempPath });
 
@@ -1111,12 +1152,10 @@ class PuppeteerDriver extends DeviceDriverBase {
     return tempPath;
   }
 
-  async setStatusBar(deviceId, flags) {
-    // await this.applesimutils.statusBarOverride(deviceId, flags);
+  async setStatusBar(flags) {
   }
 
-  async resetStatusBar(deviceId) {
-    // await this.applesimutils.statusBarReset(deviceId);
+  async resetStatusBar() {
   }
 
   async waitUntilReady() {
@@ -1137,6 +1176,10 @@ class PuppeteerDriver extends DeviceDriverBase {
 }
 
 export = {
-  DriverClass: PuppeteerDriver,
+  EnvironmentValidatorClass: PuppeteerEnvironmentValidator,
+  ArtifactPluginsProviderClass: PuppeteerArtifactPluginsProvider,
+  DeviceAllocationDriverClass: PuppeteerDeviceAllocation,
+  DeviceDeallocationDriverClass: PuppeteerDeviceDeallocation,
+  RuntimeDriverClass: PuppeteerRuntimeDriver,
   ExpectClass: WebExpect,
 };
